@@ -1,0 +1,7 @@
+python-dotenv
+pymongo
+
+livekit-agents
+livekit-plugins-google
+livekit-plugins-deepgram
+livekit-plugins-cartesia

@@ -1,0 +1,30 @@
+# Secrets (API keys, SIP credentials, MongoDB URI)
+.env
+.env.*
+!.env.example
+
+# Virtual environment
+.venv/
+venv/
+
+# Python bytecode and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Local call records (bookings and tickets saved without MongoDB)
+data/
+
+# Caches and logs
+.cache/
+.pytest_cache/
+.ruff_cache/
+*.log
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
