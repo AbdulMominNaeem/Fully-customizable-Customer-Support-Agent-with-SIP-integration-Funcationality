@@ -33,9 +33,11 @@ def _env_list(name: str) -> list[str]:
 
 async def main():
 
-    phone_number = os.getenv("SIP_PHONE_NUMBER")
+    # Comma separated, so the same number can be listed in every format
+    # the provider might send it in, e.g. +924212345678,924212345678,04212345678
+    phone_numbers = _env_list("SIP_PHONE_NUMBER")
 
-    if not phone_number:
+    if not phone_numbers:
         raise ValueError(
             "SIP_PHONE_NUMBER is missing from .env.local (e.g. +924212345678)"
         )
@@ -50,7 +52,7 @@ async def main():
 
         trunk_info = api.SIPInboundTrunkInfo(
             name=TRUNK_NAME,
-            numbers=[phone_number],
+            numbers=phone_numbers,
             # Only accept calls from your provider's IPs, if set
             allowed_addresses=_env_list("SIP_ALLOWED_ADDRESSES"),
             # Digest auth, if your provider uses a username/password

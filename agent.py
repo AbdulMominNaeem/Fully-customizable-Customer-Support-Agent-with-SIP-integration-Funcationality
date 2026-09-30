@@ -1,13 +1,19 @@
+import asyncio
 import os
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
+from google.genai import types as genai_types
 
 from livekit import agents, rtc
 from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
+    AudioConfig,
+    BackgroundAudioPlayer,
+    BuiltinAudioClip,
 )
 
 from livekit.plugins import (
@@ -31,15 +37,40 @@ load_dotenv(".env.local")
 AGENT_DISPATCH_NAME = "car-support"
 
 COMPANY_NAME = os.getenv("COMPANY_NAME", "our company")
-AGENT_NAME = os.getenv("AGENT_NAME", "Nova")
+AGENT_NAME = os.getenv("AGENT_NAME", "Anna")
 
-# "realtime": Gemini Live speech-to-speech, understands and speaks Urdu and English
+# "realtime": Gemini Live speech-to-speech, understands and speaks Urdu, English and Chinese
 # "pipeline": Deepgram + Gemini + Cartesia, English only
 VOICE_MODE = os.getenv("VOICE_MODE", "realtime")
 GEMINI_VOICE = os.getenv("GEMINI_VOICE", "Aoede")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en")
 
+# Realtime latency tuning.
+# Thinking budget 0 = answer straight away; raise it if answers get sloppy.
+GEMINI_THINKING_BUDGET = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
+# How long the caller must be silent before Anna replies. Lower is faster,
+# too low and she may cut in when the caller pauses mid-sentence.
+TURN_SILENCE_MS = int(os.getenv("TURN_SILENCE_MS", "500"))
+
 KNOWLEDGE_FILE = Path(__file__).parent / "knowledge" / "company_info.md"
+
+# Pre-recorded greeting, played the instant the call connects so the caller
+# never hears silence while Gemini Live is connecting.
+# Create it with: python make_greeting.py
+GREETING_FILE = Path(__file__).parent / "assets" / "greeting.wav"
+GREETING_TEXT = os.getenv(
+    "GREETING_TEXT",
+    f"Assalam-o-Alaikum, main {AGENT_NAME} baat kar rahi hoon {COMPANY_NAME} se, "
+    "main aap ki kya madad kar sakti hoon?",
+)
+
+# Soft keyboard typing while the caller waits for a reply, so a short pause
+# sounds like someone working instead of a dead line. "off" to disable.
+WAITING_SOUND = os.getenv("WAITING_SOUND", "on") == "on"
+
+# Seconds of silence from both sides before asking "are you still there?",
+# and again before hanging up, so an abandoned line doesn't keep billing
+SILENCE_TIMEOUT = float(os.getenv("SILENCE_TIMEOUT", "20"))
 
 
 def load_knowledge() -> str:
@@ -51,7 +82,7 @@ def load_knowledge() -> str:
 
 class CarSupportAgent(Agent):
 
-    def __init__(self, caller_number: str | None):
+    def __init__(self, caller_number: str | None, greeted: bool = False):
 
         caller_info = (
             f"The caller's phone number is {caller_number}. "
@@ -60,15 +91,24 @@ class CarSupportAgent(Agent):
             else "The caller's phone number is unknown. Ask for it when needed."
         )
 
+        if greeted:
+            caller_info += (
+                f'\n\nThe caller has already heard your greeting: "{GREETING_TEXT}" '
+                "Don't greet or introduce yourself again. "
+                "Wait for the caller and answer what they say."
+            )
+
         super().__init__(
 
             instructions=f"""
-You are {AGENT_NAME}, the AI phone assistant for {COMPANY_NAME},
+You are {AGENT_NAME}, the phone support agent for {COMPANY_NAME},
 a car company in Pakistan. You are answering a live phone call.
 
 IDENTITY
 
-If asked, say you are {AGENT_NAME}, the virtual assistant of {COMPANY_NAME}.
+When introducing yourself, just say "main {AGENT_NAME} baat kar rahi hoon {COMPANY_NAME} se"
+(in English: "this is {AGENT_NAME} from {COMPANY_NAME}").
+Never call yourself an agent or an assistant of the company.
 You are an AI assistant. Never claim to be human.
 
 PHONE VOICE STYLE
@@ -84,21 +124,35 @@ Read phone numbers digit by digit.
 Ask only one question at a time.
 If you didn't hear or understand something, politely ask the caller to repeat.
 
+Keep the call focused on what the caller needs. Don't add long explanations,
+small talk, or repeat information they already have.
+Once their request is handled, ask if there is anything else.
+If there isn't, say a short goodbye and end the call.
+
 Be warm, calm, and polite. Callers may be frustrated about
 a problem with their car, so be patient and reassuring.
 It's natural to use greetings like "Assalam-o-Alaikum" and "JazakAllah".
 
 LANGUAGE
 
-Always reply in the language the caller is speaking.
+You speak three languages: Urdu, English, and Chinese (Mandarin).
+Urdu is your default language. Start every call in Urdu and keep speaking
+Urdu unless the caller talks to you in English or Chinese.
+Once they do, reply in the language the caller is speaking.
 If they speak Urdu, reply in natural, simple, everyday Pakistani Urdu,
 the way a polite call center agent in Pakistan talks.
 Common English words like car, service, booking, model, and engine
 are fine to use in Urdu sentences.
 If they speak English, reply in English.
+If they speak Chinese, reply in natural, polite Mandarin Chinese
+(Putonghua), the way a helpful call center agent in China talks.
+Say car model names as they are normally said, and say prices in
+Chinese number words, for example "四百五十万卢比" for 45 lakh rupees.
 If they mix Urdu and English, you can mix too.
-If the caller switches language, switch with them.
+If the caller switches language, switch with them immediately.
+If you are not sure which language the caller is speaking, use Urdu.
 Never speak Hindi; use Urdu words, for example "shukriya" not "dhanyavaad".
+Never speak Cantonese or any language other than Urdu, English, and Mandarin.
 
 WHAT YOU CAN HELP WITH
 
@@ -189,12 +243,24 @@ async def phone_agent(
 
     if VOICE_MODE == "realtime":
 
-        # Gemini Live hears and speaks directly, in Urdu or English
+        # Gemini Live hears and speaks directly, in Urdu, English or Chinese
         session = AgentSession(
             llm=google.realtime.RealtimeModel(
                 model="gemini-2.5-flash-native-audio-preview-12-2025",
                 voice=GEMINI_VOICE,
+                # Skip "thinking" before each reply, the biggest source of delay
+                thinking_config=genai_types.ThinkingConfig(
+                    thinking_budget=GEMINI_THINKING_BUDGET,
+                ),
+                # Reply sooner once the caller stops talking
+                realtime_input_config=genai_types.RealtimeInputConfig(
+                    automatic_activity_detection=genai_types.AutomaticActivityDetection(
+                        end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_HIGH,
+                        silence_duration_ms=TURN_SILENCE_MS,
+                    ),
+                ),
             ),
+            user_away_timeout=SILENCE_TIMEOUT,
         )
 
     else:
@@ -213,21 +279,125 @@ async def phone_agent(
             tts=cartesia.TTS(
                 model="sonic-3",
             ),
+
+            user_away_timeout=SILENCE_TIMEOUT,
         )
+
+    silence_tasks: set[asyncio.Task] = set()
+
+    async def check_if_caller_left():
+
+        try:
+            handle = session.generate_reply(
+                instructions="The caller has gone quiet. Briefly ask if they are "
+                "still there, in the language of the conversation.",
+            )
+            await handle.wait_for_playout()
+            await asyncio.sleep(SILENCE_TIMEOUT)
+
+            # Still silent after the prompt: the caller has probably left
+            if session.user_state == "away":
+                print("Caller silent, ending call")
+
+                handle = session.generate_reply(
+                    instructions="The caller isn't responding. Say a short, polite "
+                    "goodbye in the language of the conversation.",
+                )
+                await handle.wait_for_playout()
+                await ctx.delete_room()
+
+        except Exception as e:
+            # The call may have already ended
+            print("Silence check stopped:", e)
+
+    # Background audio (greeting and waiting sound) doesn't play in console mode
+    use_background_audio = not ctx.is_fake_job()
+    play_greeting = use_background_audio and GREETING_FILE.exists()
+
+    background = BackgroundAudioPlayer(
+        # LiveKit plays this during tool calls, e.g. while saving a booking
+        thinking_sound=AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.4)
+        if WAITING_SOUND
+        else None,
+    )
+    waiting_handle = None
+
+    def start_waiting_sound():
+        nonlocal waiting_handle
+        if WAITING_SOUND and use_background_audio and (
+            waiting_handle is None or waiting_handle.done()
+        ):
+            waiting_handle = background.play(
+                AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.4),
+            )
+
+    def stop_waiting_sound():
+        if waiting_handle is not None:
+            waiting_handle.stop()
+
+    @session.on("user_state_changed")
+    def on_user_state_changed(ev):
+        if ev.new_state == "away" and not silence_tasks:
+            task = asyncio.create_task(check_if_caller_left())
+            silence_tasks.add(task)
+            task.add_done_callback(silence_tasks.discard)
+
+        # Caller finished talking and the reply isn't playing yet
+        if (
+            ev.old_state == "speaking"
+            and ev.new_state == "listening"
+            and session.agent_state != "speaking"
+        ):
+            start_waiting_sound()
+        elif ev.new_state == "speaking":
+            stop_waiting_sound()
+
+    # When the caller last stopped talking, to log how long each reply took
+    caller_stopped_at = None
+
+    @session.on("agent_state_changed")
+    def on_agent_state_changed(ev):
+        nonlocal caller_stopped_at
+        if ev.new_state == "speaking":
+            stop_waiting_sound()
+
+            if caller_stopped_at is not None:
+                print(f"Reply delay: {time.time() - caller_stopped_at:.2f}s")
+                caller_stopped_at = None
+
+    @session.on("user_state_changed")
+    def track_caller_stopped(ev):
+        nonlocal caller_stopped_at
+        if ev.old_state == "speaking" and ev.new_state == "listening":
+            caller_stopped_at = time.time()
+        elif ev.new_state == "speaking":
+            caller_stopped_at = None
+
+    if use_background_audio:
+        await background.start(room=ctx.room, agent_session=session)
+        # Stop the audio mixer cleanly when the call ends
+        ctx.add_shutdown_callback(background.aclose)
+
+    if play_greeting:
+        # Caller hears the greeting immediately; Gemini connects meanwhile
+        background.play(str(GREETING_FILE))
 
     await session.start(
         room=ctx.room,
-        agent=CarSupportAgent(caller_number),
+        agent=CarSupportAgent(caller_number, greeted=play_greeting),
     )
 
+    if play_greeting:
+        return
+
+    # No recording (or console mode): let Gemini speak the greeting
     await session.generate_reply(
         instructions=f"""
-Greet the caller in Urdu: say "Assalam-o-Alaikum", thank them for calling
-{COMPANY_NAME}, introduce yourself as {AGENT_NAME},
-and ask how you can help.
+Greet the caller in Urdu with exactly this sentence and nothing more:
+"Assalam-o-Alaikum, main {AGENT_NAME} baat kar rahi hoon {COMPANY_NAME} se, main aap ki kya madad kar sakti hoon?"
 
-Keep the greeting to one or two short sentences.
-After this, reply in whichever language the caller uses.
+Keep talking in Urdu after this. Only switch to English or Chinese (Mandarin)
+if the caller speaks to you in English or Chinese.
 """
     )
 
