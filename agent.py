@@ -22,6 +22,7 @@ from livekit.plugins import (
     cartesia,
 )
 
+from telemetry import setup_langfuse
 from tools.call_tools import (
     book_appointment,
     log_customer_issue,
@@ -240,6 +241,24 @@ async def phone_agent(
     print("Room:", ctx.room.name)
     print("Caller:", caller_number)
     print("================================")
+
+    # One Langfuse session per call, filterable by caller and voice mode
+    trace_provider = setup_langfuse(
+        metadata={
+            "langfuse.session.id": ctx.room.name,
+            "langfuse.user.id": caller_number or "unknown",
+            "langfuse.trace.tags": ["phone-call", VOICE_MODE],
+            "langfuse.trace.metadata.company": COMPANY_NAME,
+            "langfuse.trace.metadata.agent_name": AGENT_NAME,
+        }
+    )
+
+    if trace_provider is not None:
+
+        async def flush_traces():
+            trace_provider.force_flush()
+
+        ctx.add_shutdown_callback(flush_traces)
 
     if VOICE_MODE == "realtime":
 

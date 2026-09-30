@@ -5,3 +5,5 @@ livekit-agents
 livekit-plugins-google
 livekit-plugins-deepgram
 livekit-plugins-cartesia
+langfuse==4.16.0
+opentelemetry-sdk
