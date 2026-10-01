@@ -49,7 +49,7 @@ STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en")
 # Realtime latency tuning.
 # gemini-3.1-flash-live-preview starts replying in ~0.7s versus ~1.3-2.5s
 # for gemini-2.5-flash-native-audio-preview-12-2025 (measured with this prompt).
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-native-audio-preview-12-202")
 # Thinking budget 0 = answer straight away; raise it if answers get sloppy.
 # Gemini 2.5 only; Gemini 3 models use a minimal thinking level instead.
 GEMINI_THINKING_BUDGET = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
