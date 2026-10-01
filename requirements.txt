@@ -1,9 +1,13 @@
 python-dotenv
 pymongo
 
-livekit-agents
-livekit-plugins-google
-livekit-plugins-deepgram
-livekit-plugins-cartesia
-langfuse==4.16.0
-opentelemetry-sdk
+livekit-agents==1.8.3
+livekit-plugins-google==1.8.3
+livekit-plugins-deepgram==1.8.3
+livekit-plugins-cartesia==1.8.3
+
+langfuse==4.15.6
+
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp==1.44.0

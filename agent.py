@@ -38,7 +38,7 @@ load_dotenv(".env.local")
 AGENT_DISPATCH_NAME = "car-support"
 
 COMPANY_NAME = os.getenv("COMPANY_NAME", "our company")
-AGENT_NAME = os.getenv("AGENT_NAME", "Anna")
+AGENT_NAME = os.getenv("AGENT_NAME", "Ayesha")
 
 # "realtime": Gemini Live speech-to-speech, understands and speaks Urdu, English and Chinese
 # "pipeline": Deepgram + Gemini + Cartesia, English only
@@ -47,9 +47,13 @@ GEMINI_VOICE = os.getenv("GEMINI_VOICE", "Aoede")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en")
 
 # Realtime latency tuning.
+# gemini-3.1-flash-live-preview starts replying in ~0.7s versus ~1.3-2.5s
+# for gemini-2.5-flash-native-audio-preview-12-2025 (measured with this prompt).
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview")
 # Thinking budget 0 = answer straight away; raise it if answers get sloppy.
+# Gemini 2.5 only; Gemini 3 models use a minimal thinking level instead.
 GEMINI_THINKING_BUDGET = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
-# How long the caller must be silent before Anna replies. Lower is faster,
+# How long the caller must be silent before Ayesha replies. Lower is faster,
 # too low and she may cut in when the caller pauses mid-sentence.
 TURN_SILENCE_MS = int(os.getenv("TURN_SILENCE_MS", "500"))
 
@@ -118,9 +122,10 @@ This is a phone call, so everything you say is spoken aloud.
 
 Keep answers short: one to three sentences.
 Never use markdown, lists, symbols, or emojis.
-Say prices in words the way Pakistanis say them, for example
-"forty-five lakh rupees" or "paintalees lakh rupay"
-instead of "PKR 4,500,000".
+Say prices in lakh and crore, the way Pakistanis say them,
+not as "PKR" with digits.
+Always use the exact price from the company information;
+never round it or change the number when converting it to words.
 Read phone numbers digit by digit.
 Ask only one question at a time.
 If you didn't hear or understand something, politely ask the caller to repeat.
@@ -140,6 +145,8 @@ You speak three languages: Urdu, English, and Chinese (Mandarin).
 Urdu is your default language. Start every call in Urdu and keep speaking
 Urdu unless the caller talks to you in English or Chinese.
 Once they do, reply in the language the caller is speaking.
+Always match the language of the caller's latest message: if they say
+something in English, answer in English, even if earlier turns were in Urdu.
 If they speak Urdu, reply in natural, simple, everyday Pakistani Urdu,
 the way a polite call center agent in Pakistan talks.
 Common English words like car, service, booking, model, and engine
@@ -265,12 +272,12 @@ async def phone_agent(
         # Gemini Live hears and speaks directly, in Urdu, English or Chinese
         session = AgentSession(
             llm=google.realtime.RealtimeModel(
-                model="gemini-2.5-flash-native-audio-preview-12-2025",
+                model=GEMINI_MODEL,
                 voice=GEMINI_VOICE,
-                # Skip "thinking" before each reply, the biggest source of delay
-                thinking_config=genai_types.ThinkingConfig(
-                    thinking_budget=GEMINI_THINKING_BUDGET,
-                ),
+                # Keep "thinking" before each reply to a minimum
+                thinking_config=genai_types.ThinkingConfig(thinking_level="minimal")
+                if "gemini-3" in GEMINI_MODEL
+                else genai_types.ThinkingConfig(thinking_budget=GEMINI_THINKING_BUDGET),
                 # Reply sooner once the caller stops talking
                 realtime_input_config=genai_types.RealtimeInputConfig(
                     automatic_activity_detection=genai_types.AutomaticActivityDetection(
